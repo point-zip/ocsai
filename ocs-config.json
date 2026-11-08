@@ -1,0 +1,19 @@
+[
+  {
+    "name": "AI 搜题",
+    "homepage": "http://127.0.0.1:6767/",
+    "url": "http://127.0.0.1:6767/solve",
+    "method": "post",
+    "type": "GM_xmlhttpRequest",
+    "contentType": "json",
+    "data": {
+      "title": "${title}",
+      "options": "${options}",
+      "type": "${type}",
+      "images": {
+        "handler": "return (env) => env.images || []"
+      }
+    },
+    "handler": "return (res) => { if (!res || !res.ok || !res.answer) return []; return [[res.question, res.answer]]; }"
+  }
+]

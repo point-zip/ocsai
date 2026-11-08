@@ -1,0 +1,12 @@
+[project]
+name = "ocs-ai-tiku"
+version = "1.0.0"
+description = "把 OCS 网课助手的搜题请求转发给 AI，返回脚本能精确命中的答案"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "httpx>=0.27.0",
+]
