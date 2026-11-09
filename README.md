@@ -1,6 +1,6 @@
 # OCS AI Tiku
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 
 把 [OCS 网课助手](https://github.com/ocsjs/ocsjs) 的搜题请求转发给 AI，
@@ -68,8 +68,11 @@ OCS_MODEL=gpt-4.1-mini
 看到下面这行就成功了：
 
 ```
-Uvicorn running on http://0.0.0.0:6767
+Uvicorn running on http://127.0.0.1:6767
 ```
+
+> 默认只监听回环，本机脚本即可使用。要让别的机器访问，**先设 `OCS_API_TOKEN`**，
+> 再把 `OCS_HOST` 改成 `0.0.0.0`。启动日志会对此给出警告。
 
 验证：
 
@@ -146,12 +149,32 @@ OCS 的连接探测 `probeAnswerer` 先发 **HEAD**，遇到 `405/501` 才退回
 | `OCS_REASONING_EFFORT` | `low` | 思考等级：`low` / `medium` / `high` |
 | `OCS_AI_TIMEOUT` | `45` | 单次 AI 超时（秒），**必须 < 58** |
 | `OCS_USE_JSON_SCHEMA` | `true` | 网关不支持结构化输出时设 `false` |
-| `OCS_HOST` | `0.0.0.0` | 监听地址 |
+| `OCS_HOST` | `127.0.0.1` | 监听地址，默认仅本机 |
 | `OCS_PORT` | `6767` | 端口 |
-| `OCS_API_TOKEN` | 空 | 访问令牌，公网部署建议设置 |
+| `OCS_API_TOKEN` | 空 | 访问令牌，对外开放时**必须**设置 |
+| `OCS_MIN_CONFIDENCE` | `0.55` | 低于该置信度直接 `ok:false`，宁可不填也不填错 |
+| `OCS_MAX_IMAGES` | `6` | 单题最多图片数，超限整体拒绝 |
+| `OCS_MAX_IMAGE_KB` | `4096` | 单张图片大小上限（KB），超限整体拒绝 |
 | `OCS_CACHE_ENABLED` | `true` | 答案缓存（SQLite） |
+| `OCS_CACHE_PATH` | `cache.sqlite3` | 缓存文件路径，相对路径基于项目目录 |
 | `OCS_CACHE_TTL_DAYS` | `30` | 缓存有效期 |
 | `OCS_CACHE_MAX_ROWS` | `50000` | 缓存上限，超出按命中数淘汰 |
+
+### 缓存与选项乱序
+
+缓存键由 **题目 + 选项归一化指纹 + 题型 + 图片内容摘要** 组成。
+
+**选项指纹与顺序无关**：归一化（去 `A.` 前缀、去标点、转小写）后排序再算哈希。
+所以页面把 ABCD 打乱不会导致缓存失效——同一道题打乱前后命中同一条缓存。
+
+**命中也不会答错**：缓存里存的是选项原文（如 `B. 叶绿体`），而脚本
+`resolveSingle` 是拿文本归一化比对，与字母位置无关。打乱后页面变成
+`A.丙 B.甲 C.叶绿体`，脚本依然精确落到「叶绿体」那一行。
+
+**图片参与键**：同一题干、不同配图的题不会共享答案，避免错误答案被固化一整个 TTL。
+
+已知边界：位置相关选项（「以上都是」「A 和 B 均正确」）打乱后语义本身就会变，
+这类题命中缓存可能返回与原顺序绑定的答案。
 
 ### 关于 60 秒硬超时
 
@@ -253,6 +276,52 @@ location /ocs-solve {
 
 ---
 
+## 从旧版本升级（缓存迁移）
+
+缓存键的算法变过一次：
+
+| 版本 | 缓存键 |
+|---|---|
+| 旧 | `sha256(题目 + 原始选项列表 + 题型)` |
+| 现在 | `sha256(题目 + 选项**顺序无关**归一化指纹 + 题型 + **图片摘要**)` |
+
+所以**旧库里的行在新代码下永远命中不了**——它们不是数据，是死行：
+算不出同样的键，却照占 `OCS_CACHE_MAX_ROWS` 配额；而且旧行的 `hits`
+可能很高，会长期赖在淘汰队列（`ORDER BY hits ASC`）尾部清不掉。
+
+不迁移也能正常跑（新库从零开始），只是那批旧题会被重新问一遍 AI。
+要保留就把键重算一遍：
+
+```bash
+# 1. 先干跑，只看统计
+python migrate_cache.py --src /path/to/old/cache.sqlite3 --dry-run
+
+# 2. 生成新库，旧库原封不动
+python migrate_cache.py --src /path/to/old/cache.sqlite3 --verify
+#    -> 写出同目录下 cache.migrated.sqlite3，并抽样走一遍 cache.get 自检
+
+# 3. 确认后替换，或改 OCS_CACHE_PATH 指过去
+mv cache.migrated.sqlite3 cache.sqlite3
+```
+
+原地迁移也可以（会自动备份成 `cache.sqlite3.bak-<时间戳>`）：
+
+```bash
+python migrate_cache.py --src cache.sqlite3 --in-place --verify
+```
+
+几个要点：
+
+- **脚本默认只读打开源库**。读写模式会让 SQLite 在关闭时做 autocheckpoint，
+  把 `-wal` 合并进主库——等于顺手改了你的旧库。只读能读到 WAL 里的数据，且不动文件。
+- **同题不同选项顺序的旧行会合并成一条**（这本来也是新键的意义所在）。
+  冲突时保留 `created_at` 较新的 payload，`hits` 取较大值，重跑幂等。
+- **旧键不含图片信息**，迁移后所有行都按「无图」记录。旧库里若混有图片题的缓存，
+  会以无图身份存在，理论上可能与同题干的纯文字题撞键。保守做法是加
+  `--skip-image-suspects`，按题干关键词（如图/下图/图中…）跳过这批行。
+
+---
+
 ## 测试
 
 ```bash
@@ -279,6 +348,9 @@ python test_script_sim.py   # 全链路：模拟脚本占位符替换 + handler 
 | 答案错位（选了别的选项） | 选项含特殊字符，检查 `normalize.py` 的 `strip_prefix` |
 | 填空题全空 | AI 数错空位数，看题干 `____` 的写法 |
 | 请求 60s 超时 | `OCS_AI_TIMEOUT` 太大或模型太慢 |
+| 一直返回 `index_out_of_range` | AI 给出了页面不存在的选项字母，看日志里的 `letters=` |
+| 一直返回 `low_confidence` | AI 对该题没把握，可调低 `OCS_MIN_CONFIDENCE` |
+| 返回 `too_many_images` / `image_too_large` | 图片超限，调 `OCS_MAX_IMAGES` / `OCS_MAX_IMAGE_KB` |
 | 图片题搜不到 | 模型不支持图片，或脚本「图片题优化」没开 |
 | `Mixed Content` 报错 | 用了 `fetch` 而不是 `GM_xmlhttpRequest` |
 
@@ -295,6 +367,7 @@ ocs-ai-tiku/
 ├── normalize.py        答案归一化（核心）
 ├── cache.py            SQLite 答案缓存
 ├── config.py           .env 配置加载
+├── migrate_cache.py    旧缓存库 key 迁移
 ├── ocs-config.json     粘贴进脚本的题库配置
 ├── test_resolve.py     归一化单元测试
 ├── test_e2e.py         端到端测试（mock AI）
@@ -315,4 +388,4 @@ AI 返回的答案不保证正确，尤其是需要推理的题目。请自行�
 
 ## License
 
-[MIT](LICENSE)
+[AGPL-3.0](LICENSE)

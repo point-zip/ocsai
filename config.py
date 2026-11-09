@@ -64,6 +64,9 @@ class Settings:
     host: str
     port: int
     api_token: str
+    min_confidence: float
+    max_images: int
+    max_image_kb: int
     cache_enabled: bool
     cache_path: Path
     cache_ttl_days: int
@@ -83,6 +86,13 @@ class Settings:
             warn.append(
                 f"OCS_AI_TIMEOUT={self.ai_timeout}s 接近脚本硬超时 60s，建议 <=50"
             )
+        if self.host in ("0.0.0.0", "::") and not self.api_token:
+            warn.append(
+                f"OCS_HOST={self.host} 且未设置 OCS_API_TOKEN：服务对全网开放，"
+                "任何人都能消耗你的 AI 额度。公网部署请设 token，或改监听 127.0.0.1"
+            )
+        if not 0.0 <= self.min_confidence <= 1.0:
+            warn.append(f"OCS_MIN_CONFIDENCE={self.min_confidence} 超出 0~1 范围")
         return warn
 
 
@@ -97,9 +107,12 @@ def load_settings() -> Settings:
         reasoning_effort=_s("OCS_REASONING_EFFORT", "low"),
         ai_timeout=_f("OCS_AI_TIMEOUT", 45.0),
         use_json_schema=_b("OCS_USE_JSON_SCHEMA", True),
-        host=_s("OCS_HOST", "0.0.0.0"),
+        host=_s("OCS_HOST", "127.0.0.1"),
         port=_i("OCS_PORT", 6767),
         api_token=_s("OCS_API_TOKEN", ""),
+        min_confidence=_f("OCS_MIN_CONFIDENCE", 0.55),
+        max_images=_i("OCS_MAX_IMAGES", 6),
+        max_image_kb=_i("OCS_MAX_IMAGE_KB", 4096),
         cache_enabled=_b("OCS_CACHE_ENABLED", True),
         cache_path=cache_path,
         cache_ttl_days=_i("OCS_CACHE_TTL_DAYS", 30),

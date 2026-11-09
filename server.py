@@ -7,6 +7,8 @@
 """
 from __future__ import annotations
 
+import asyncio
+import atexit
 import json
 import logging
 import time
@@ -20,7 +22,17 @@ from fastapi.responses import JSONResponse
 import cache
 from ai_client import ask_ai
 from config import settings
-from normalize import build_answer_string, resolve_judgement, split_options
+from normalize import (
+    DEFAULT_SEPARATORS,
+    build_answer_string,
+    letters_to_indices,
+    resolve_judgement,
+    split_options,
+)
+
+# 多选题答案分隔符：与 normalize.build_answer_string 共用同一个来源，
+# 避免 server 用 "#"、normalize 用 "===" 这种两处常量各说各话。
+MULTI_SEP = DEFAULT_SEPARATORS[0]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,6 +51,9 @@ app.add_middleware(
 
 START_TS = time.time()
 STATS = {"requests": 0, "cache_hit": 0, "ai_calls": 0, "errors": 0, "empty": 0}
+
+# 命中计数攒批写盘，退出时兜底刷一次，别把最后几十次命中丢了
+atexit.register(cache.flush)
 
 
 def _auth_ok(request: Request) -> bool:
@@ -92,13 +107,34 @@ def _parse_images(raw: Any) -> list[str]:
     return []
 
 
+def _validate_images(images: list[str]) -> str | None:
+    """校验图片数量与体积，返回错误原因或 None。
+
+    超限时**整体拒绝**而不是丢掉几张：图片是解题必需信息，
+    丢图等于让 AI 瞎猜，而且裁剪后的图片列表还会污染缓存键
+    （有图请求退化成无图请求的键）。
+    """
+    if len(images) > max(0, settings.max_images):
+        return "too_many_images"
+    max_bytes = max(1, settings.max_image_kb) * 1024
+    for img in images:
+        if not img:
+            continue
+        # data URI 的 base64 段长度 × 3/4 ≈ 原始字节数
+        approx = len(img) * 3 // 4 if img.startswith("data:") else len(img.encode("utf-8"))
+        if approx > max_bytes:
+            return "image_too_large"
+    return None
+
+
 async def _solve(title: str, options_raw: str, qtype: str, images: list[str]) -> dict[str, Any]:
     options = split_options(options_raw)
     qtype = (qtype or "").strip().lower()
     if qtype not in ("single", "multiple", "judgement", "completion"):
         qtype = "unknown"
 
-    cached = cache.get(title, options, qtype)
+    # 缓存是同步 SQLite，丢线程池：不能在事件循环里 fsync 阻塞整个服务。
+    cached = await asyncio.to_thread(cache.get, title, options, qtype, images)
     if cached is not None:
         STATS["cache_hit"] += 1
         cached = dict(cached)
@@ -126,8 +162,18 @@ async def _solve(title: str, options_raw: str, qtype: str, images: list[str]) ->
         return {"ok": False, "reason": "no_payload"}
 
     confidence = payload.get("confidence")
-    if isinstance(confidence, (int, float)) and confidence <= 0:
+    # bool 是 int 的子类：模型返回 true 时不能被当成 1.0
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+        confidence = 0.0
+    confidence = float(confidence)
+    if confidence < settings.min_confidence:
         STATS["empty"] += 1
+        log.info(
+            "置信度 %.2f 低于阈值 %.2f，拒绝作答: %s",
+            confidence,
+            settings.min_confidence,
+            title[:40],
+        )
         return {"ok": False, "reason": "low_confidence"}
 
     letters = payload.get("letters") or []
@@ -139,8 +185,6 @@ async def _solve(title: str, options_raw: str, qtype: str, images: list[str]) ->
             answer_text = json.dumps(
                 [str(b).strip() for b in blanks if str(b).strip()], ensure_ascii=False
             )
-        elif isinstance(letters, list) and letters:
-            answer_text = ""
     else:
         letter_str = ""
         if isinstance(letters, list):
@@ -149,14 +193,27 @@ async def _solve(title: str, options_raw: str, qtype: str, images: list[str]) ->
             letter_str = letters.upper().strip()
 
         if letter_str:
-            idxs = [ord(c) - 65 for c in letter_str if "A" <= c <= "Z"]
-            picked = [options[i] for i in idxs if 0 <= i < len(options)]
+            # 复用 normalize 里的实现：去重 + 排序，别在 server 里再手写一遍
+            idxs = letters_to_indices(letter_str)
+            out_of_range = [i for i in idxs if i >= len(options)]
+            if out_of_range:
+                # AI 幻觉出页面不存在的字母。宁可判失败也不要给半截答案：
+                # 多选题丢一项必然判错，单选题错位会填错选项。
+                STATS["empty"] += 1
+                log.warning(
+                    "AI 返回越界字母 letters=%s idxs=%s 选项数=%d，题目: %s",
+                    letter_str,
+                    idxs,
+                    len(options),
+                    title[:40],
+                )
+                return {"ok": False, "reason": "index_out_of_range"}
+            picked = [options[i] for i in idxs]
             if picked:
                 if qtype == "judgement":
-                    j = resolve_judgement(picked[0])
-                    answer_text = j or ""
+                    answer_text = resolve_judgement(picked[0]) or ""
                 elif qtype == "multiple":
-                    answer_text = "#".join(picked)
+                    answer_text = MULTI_SEP.join(picked)
                 else:
                     answer_text = picked[0]
 
@@ -175,7 +232,7 @@ async def _solve(title: str, options_raw: str, qtype: str, images: list[str]) ->
         "confidence": confidence,
         "cached": False,
     }
-    cache.put(title, options, qtype, result)
+    await asyncio.to_thread(cache.put, title, options, qtype, result, images)
     return result
 
 
@@ -211,6 +268,18 @@ async def solve(request: Request) -> JSONResponse:
     if not title:
         return JSONResponse({"ok": False, "reason": "empty_title"}, status_code=200)
 
+    bad_images = _validate_images(images)
+    if bad_images:
+        STATS["errors"] += 1
+        log.warning(
+            "拒绝请求 %s: imgs=%d (上限 %d 张 / %d KB)",
+            bad_images,
+            len(images),
+            settings.max_images,
+            settings.max_image_kb,
+        )
+        return JSONResponse({"ok": False, "reason": bad_images}, status_code=200)
+
     log.info(
         "solve type=%s opts=%d imgs=%d title=%s",
         qtype,
@@ -224,7 +293,8 @@ async def solve(request: Request) -> JSONResponse:
 
 
 @app.get("/health")
-async def health() -> dict[str, Any]:
+def health() -> dict[str, Any]:
+    # 同步端点：cache.stats() 是阻塞 SQLite，交给 FastAPI 的线程池
     return {
         "ok": True,
         "uptime": round(time.time() - START_TS, 1),
@@ -237,7 +307,7 @@ async def health() -> dict[str, Any]:
 
 
 @app.get("/stats")
-async def stats_endpoint() -> dict[str, Any]:
+def stats_endpoint() -> dict[str, Any]:
     return {"stats": STATS, "cache": cache.stats()}
 
 

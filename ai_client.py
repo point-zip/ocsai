@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -16,6 +17,11 @@ import httpx
 from config import settings
 
 log = logging.getLogger("ai")
+
+# 限流 / 网关抖动只该浪费一次退避，不该让整道题判死。
+# 脚本侧有 60s 硬超时，一次 0.6s 重试完全放得下。
+_RETRY_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
+_RETRY_DELAY = 0.6
 
 SYSTEM_PROMPT = """你是网课题库的答题引擎。用户会给你一道题，你必须选出正确答案。
 
@@ -144,6 +150,33 @@ def parse_answer_payload(raw: str) -> dict[str, Any]:
     return {}
 
 
+async def _post_with_retry(
+    client: httpx.AsyncClient,
+    url: str,
+    body: dict[str, Any],
+    headers: dict[str, str],
+) -> httpx.Response:
+    """一次退避重试。
+
+    只重试传输层错误和明确可重试的状态码；其余 4xx 是语义错误，立即返回。
+    """
+    for attempt in (0, 1):
+        try:
+            resp = await client.post(url, json=body, headers=headers)
+        except httpx.TransportError as e:
+            if attempt == 0:
+                log.warning("AI 传输层错误，%.1fs 后重试: %s", _RETRY_DELAY, e)
+                await asyncio.sleep(_RETRY_DELAY)
+                continue
+            raise
+        if resp.status_code in _RETRY_STATUS and attempt == 0:
+            log.warning("AI 返回 %s，%.1fs 后重试", resp.status_code, _RETRY_DELAY)
+            await asyncio.sleep(_RETRY_DELAY)
+            continue
+        return resp
+    raise RuntimeError("AI 重试耗尽")  # pragma: no cover
+
+
 async def ask_ai(
     title: str,
     options: list[str],
@@ -181,7 +214,9 @@ async def ask_ai(
 
     timeout = httpx.Timeout(settings.ai_timeout, connect=10.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(settings.responses_url, json=body, headers=headers)
+        resp = await _post_with_retry(
+            client, settings.responses_url, body, headers
+        )
 
         if resp.status_code >= 400:
             detail = resp.text[:500]
@@ -190,14 +225,20 @@ async def ask_ai(
             if settings.use_json_schema and resp.status_code in (400, 422):
                 log.warning("尝试移除 json_schema 重试")
                 body.pop("text", None)
-                resp = await client.post(settings.responses_url, json=body, headers=headers)
+                resp = await _post_with_retry(
+                    client, settings.responses_url, body, headers
+                )
                 if resp.status_code >= 400:
                     log.error("AI 重试仍失败 %s: %s", resp.status_code, resp.text[:500])
                     return {}
             else:
                 return {}
 
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError:
+            log.error("AI 返回非 JSON 响应: %s", resp.text[:200])
+            return {}
 
     raw = extract_output_text(data)
     if not raw:

@@ -1,0 +1,20 @@
+# 统一换行符：仓库内一律存 LF。
+#
+# Windows 上 Git 默认 core.autocrlf=true，会把工作区的 LF 改写成 CRLF、
+# 存库时再转回 LF，结果每次 diff 都要过一遍换行归一化，还容易把
+# "只改了换行"的文件混进提交。这里显式声明，优先级高于 autocrlf。
+
+* text=auto eol=lf
+
+*.py      text eol=lf
+*.md      text eol=lf
+*.toml    text eol=lf
+*.txt     text eol=lf
+*.json    text eol=lf
+*.example text eol=lf
+LICENSE   text eol=lf
+
+# 二进制，别碰
+*.png     binary
+*.jpg     binary
+*.sqlite3 binary
