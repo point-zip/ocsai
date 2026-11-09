@@ -80,6 +80,8 @@ Uvicorn running on http://127.0.0.1:6767
 curl http://127.0.0.1:6767/health
 ```
 
+浏览器打开 <http://127.0.0.1:6767/> 就是管理面板：看板、缓存浏览、删单条缓存。
+
 ---
 
 ## 接进脚本
@@ -151,7 +153,7 @@ OCS 的连接探测 `probeAnswerer` 先发 **HEAD**，遇到 `405/501` 才退回
 | `OCS_USE_JSON_SCHEMA` | `true` | 网关不支持结构化输出时设 `false` |
 | `OCS_HOST` | `127.0.0.1` | 监听地址，默认仅本机 |
 | `OCS_PORT` | `6767` | 端口 |
-| `OCS_API_TOKEN` | 空 | 访问令牌，对外开放时**必须**设置 |
+| `OCS_API_TOKEN` | 空 | 访问令牌。设了才解锁删除缓存；对外开放时**必须**设置 |
 | `OCS_MIN_CONFIDENCE` | `0.55` | 低于该置信度直接 `ok:false`，宁可不填也不填错 |
 | `OCS_MAX_IMAGES` | `6` | 单题最多图片数，超限整体拒绝 |
 | `OCS_MAX_IMAGE_KB` | `4096` | 单张图片大小上限（KB），超限整体拒绝 |
@@ -243,10 +245,14 @@ location /ocs-solve {
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
+| GET | `/` | 管理面板（看板 + 缓存浏览） |
 | POST | `/solve` | 脚本调用 |
 | GET/HEAD | `/solve` | 连接探测（返回 200） |
 | GET | `/health` | 健康检查 + 统计 |
 | GET | `/stats` | 缓存与调用统计 |
+| GET | `/api/dashboard` | 看板数据（运行时统计 + 缓存概况） |
+| GET | `/api/cache` | 缓存分页浏览，支持 `page` `size` `q` `sort` |
+| DELETE | `/api/cache/{key}` | 删除单条缓存，**需要 token** |
 
 `POST /solve` 请求：
 
@@ -273,6 +279,48 @@ location /ocs-solve {
 ```
 
 `ok:false` 时脚本显示"题库没搜索到答案"，**不会乱填**。
+
+`GET /api/cache` 参数：`page`（默认 1）、`size`（默认 20，上限 200）、
+`q`（在题干和答案里做子串匹配）、`sort`（`recent` 默认 / `hits`）。
+
+`DELETE /api/cache/{key}` 的鉴权分级：
+
+| 服务端配置 | 请求头 | 结果 |
+|---|---|---|
+| 未设 `OCS_API_TOKEN` | 任意 | `403 admin_disabled`，删除能力整体关闭 |
+| 设了 token | 缺 token / token 错 | `401 unauthorized` |
+| 设了 token | `X-API-Token` 或 `Authorization: Bearer` 正确 | `200`，`deleted: 1` |
+| 设了 token | key 不是 64 位 hex | `400 bad_key` |
+| 设了 token | key 合法但不存在 | `404 not_found` |
+
+---
+
+## 管理面板
+
+启动服务后打开 `http://127.0.0.1:6767/` 就是控制台，单文件、无前端依赖、离线可用。
+
+**数据看板**（每 10 秒自动刷新）：
+
+- 缓存命中率（命中数 / 请求数）
+- 运行时长、启动时间
+- 缓存条数与占用（`rows / max_rows`，超 80% 变黄、95% 变红）
+- AI 调用数及占请求比例
+- 总命中次数（含尚未落盘的计数）
+- 空答案数、错误数
+- 缓存开关与 TTL
+- 启动时的配置告警（比如对外监听却没设 token）
+
+**缓存题目浏览**：按最近更新或命中次数排序，支持搜索题干/答案、分页（20/50/100 每页）。
+每行显示题型、答案、置信度、命中次数、创建时间和过期标记（超出 TTL 的行命中路径不会再用到）。
+
+**删除单条缓存**：点「令牌」填入 `OCS_API_TOKEN` 的值，之后每行的「删除」按钮才可用。
+
+- 令牌只存在当前标签页的 `sessionStorage`，关闭即失效，后端不做任何持久化
+- 服务端没配 `OCS_API_TOKEN` 时，删除按钮被禁用，接口直接返回 `403`
+- 删除是幂等的：重复删除同一条会得到 `404`，不会报错崩溃
+
+> 站在安全角度：**没设 token 就别把服务暴露到公网**。`/solve` 在无 token 时是放行的
+> （脚本连接探测需要），删除接口则始终要求 token，两者刻意分开。
 
 ---
 
@@ -351,6 +399,9 @@ python test_script_sim.py   # 全链路：模拟脚本占位符替换 + handler 
 | 一直返回 `index_out_of_range` | AI 给出了页面不存在的选项字母，看日志里的 `letters=` |
 | 一直返回 `low_confidence` | AI 对该题没把握，可调低 `OCS_MIN_CONFIDENCE` |
 | 返回 `too_many_images` / `image_too_large` | 图片超限，调 `OCS_MAX_IMAGES` / `OCS_MAX_IMAGE_KB` |
+| 管理页删除按钮是灰的 | 服务端没配 `OCS_API_TOKEN`，删除接口整体关闭 |
+| 点删除提示「令牌无效」 | 填的 token 与 `OCS_API_TOKEN` 不一致，点「令牌」重填 |
+| 打开 `/` 只有一行 JSON | `static/index.html` 不在，面板未部署 |
 | 图片题搜不到 | 模型不支持图片，或脚本「图片题优化」没开 |
 | `Mixed Content` 报错 | 用了 `fetch` 而不是 `GM_xmlhttpRequest` |
 
@@ -362,7 +413,9 @@ python test_script_sim.py   # 全链路：模拟脚本占位符替换 + handler 
 
 ```
 ocs-ai-tiku/
-├── server.py           FastAPI 入口：/solve /health /stats
+├── server.py           FastAPI 入口：/solve /health /stats /api/*
+├── static/
+│   └── index.html      管理面板（看板 + 缓存浏览，单文件无依赖）
 ├── ai_client.py        OpenAI Responses API 调用
 ├── normalize.py        答案归一化（核心）
 ├── cache.py            SQLite 答案缓存

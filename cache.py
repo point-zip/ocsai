@@ -220,3 +220,95 @@ def stats() -> dict[str, Any]:
         }
     except sqlite3.Error as e:
         return {"error": str(e), "enabled": settings.cache_enabled}
+
+
+def list_items(
+    page: int = 1,
+    size: int = 20,
+    query: str = "",
+    sort: str = "recent",
+) -> tuple[list[dict[str, Any]], int]:
+    """分页列出缓存条目，返回 (items, total)。
+
+    只回列表需要的字段：完整 payload 留给 /solve 命中路径，
+    管理页不需要把 options 原文整段搬过去。
+    """
+    if not settings.cache_enabled:
+        return [], 0
+
+    size = max(1, min(int(size), 200))
+    page = max(1, int(page))
+    offset = (page - 1) * size
+
+    where = ""
+    params: list[Any] = []
+    q = (query or "").strip()
+    if q:
+        where = " WHERE question LIKE ? OR payload LIKE ?"
+        like = f"%{q}%"
+        params = [like, like]
+
+    order = "created_at DESC" if sort != "hits" else "hits DESC, created_at DESC"
+    cutoff = time.time() - settings.cache_ttl_days * 86400
+
+    try:
+        with _lock:
+            conn = _connect()
+            total = conn.execute(
+                f"SELECT COUNT(*) FROM answers{where}", params
+            ).fetchone()[0]
+            rows = conn.execute(
+                "SELECT key, question, options, qtype, payload, created_at, hits "
+                f"FROM answers{where} ORDER BY {order} LIMIT ? OFFSET ?",
+                [*params, size, offset],
+            ).fetchall()
+            # 锁内快照：_flush_hits 会 clear()，锁外读会撞见半空状态
+            pending = dict(_hits_buf)
+    except sqlite3.Error as e:
+        log.warning("缓存列举失败: %s", e)
+        return [], 0
+
+    items: list[dict[str, Any]] = []
+    for key, question, options, qtype, payload, created_at, hits in rows:
+        try:
+            data = json.loads(payload) if payload else {}
+        except (json.JSONDecodeError, TypeError):
+            data = {}
+        try:
+            opts = json.loads(options) if options else []
+            options_count = len(opts) if isinstance(opts, list) else 0
+        except (json.JSONDecodeError, TypeError):
+            options_count = 0
+
+        items.append(
+            {
+                "key": key,
+                "question": question,
+                "qtype": qtype,
+                "answer": data.get("answer", "") if isinstance(data, dict) else "",
+                "confidence": data.get("confidence") if isinstance(data, dict) else None,
+                "options_count": options_count,
+                "hits": (hits or 0) + pending.get(key, 0),
+                "created_at": created_at,
+                "expired": bool(created_at and created_at < cutoff),
+            }
+        )
+    return items, total
+
+
+def delete(key: str) -> bool:
+    """删除单条缓存。返回是否真的删掉了（key 不存在返回 False）。"""
+    if not key:
+        return False
+    try:
+        with _lock:
+            conn = _connect()
+            cur = conn.execute("DELETE FROM answers WHERE key=?", (key,))
+            conn.commit()
+            removed = cur.rowcount > 0
+            # 待刷盘的命中计数也要丢掉，否则下次 flush 会 UPDATE 一条不存在的行
+            _hits_buf.pop(key, None)
+        return removed
+    except sqlite3.Error as e:
+        log.warning("缓存删除失败: %s", e)
+        return False

@@ -1,0 +1,634 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OCS AI Tiku · 控制台</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel-2:#1c2128; --panel-3:#21262d;
+    --border:#30363d; --border-soft:#21262d;
+    --text:#e6edf3; --text-dim:#c9d1d9; --muted:#8b949e; --faint:#6e7681;
+    --accent:#58a6ff; --accent-dim:#1f6feb;
+    --ok:#3fb950; --warn:#d29922; --danger:#f85149;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+    --radius:10px;
+  }
+  *{box-sizing:border-box}
+  /* 作者样式里的 display:flex 会盖掉 hidden 属性自带的 display:none，必须显式兜底 */
+  [hidden]{display:none !important}
+  html,body{margin:0;padding:0}
+  body{
+    background:var(--bg); color:var(--text); font-family:var(--sans);
+    font-size:14px; line-height:1.55; -webkit-font-smoothing:antialiased;
+    padding:28px 24px 64px; min-height:100vh;
+  }
+  .wrap{max-width:1180px;margin:0 auto}
+
+  /* ---------- header ---------- */
+  header{display:flex;align-items:center;justify-content:space-between;gap:20px;flex-wrap:wrap;margin-bottom:22px}
+  .brand{display:flex;align-items:center;gap:12px}
+  .logo{
+    width:38px;height:38px;display:grid;place-items:center;border-radius:10px;
+    background:linear-gradient(145deg,#1f6feb,#0d419d);color:#fff;font-size:19px;
+    box-shadow:0 0 0 1px #1f6feb55, 0 4px 14px -6px #1f6feb88;
+  }
+  h1{margin:0;font-size:17px;font-weight:600;letter-spacing:.2px}
+  .sub{margin:1px 0 0;color:var(--muted);font-size:12.5px}
+  .header-right{display:flex;align-items:center;gap:10px}
+  .status{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--muted);
+    background:var(--panel);border:1px solid var(--border);border-radius:999px;padding:5px 12px}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--muted);flex:none;transition:background .2s}
+  .dot.on{background:var(--ok);box-shadow:0 0 0 3px #3fb95022}
+  .dot.off{background:var(--danger);box-shadow:0 0 0 3px #f8514922}
+
+  /* ---------- buttons / inputs ---------- */
+  .btn{
+    appearance:none;font:inherit;font-size:13px;cursor:pointer;color:var(--text-dim);
+    background:var(--panel-3);border:1px solid var(--border);border-radius:7px;
+    padding:6px 13px;transition:background .15s,border-color .15s,color .15s;
+  }
+  .btn:hover:not(:disabled){background:#30363d;color:var(--text);border-color:#484f58}
+  .btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+  .btn.ghost{background:transparent}
+  .btn.ghost:hover:not(:disabled){background:var(--panel-3)}
+  .btn.danger{color:var(--danger);border-color:#f8514933;background:#f851490f}
+  .btn.danger:hover:not(:disabled){background:#f851491f;border-color:#f8514977;color:#ff7b72}
+  .btn.sm{padding:4px 9px;font-size:12px;border-radius:6px}
+  input,select{
+    font:inherit;font-size:13px;color:var(--text);background:var(--bg);
+    border:1px solid var(--border);border-radius:7px;padding:6px 10px;transition:border-color .15s;
+  }
+  input:focus,select:focus{outline:none;border-color:var(--accent-dim);box-shadow:0 0 0 3px #1f6feb2b}
+  input::placeholder{color:var(--faint)}
+  select{cursor:pointer}
+
+  /* ---------- warnings ---------- */
+  .warnings{margin-bottom:18px;display:flex;flex-direction:column;gap:7px}
+  .warn-item{
+    display:flex;gap:9px;align-items:flex-start;font-size:13px;color:#e3b341;
+    background:#d2992212;border:1px solid #d2992233;border-radius:8px;padding:9px 13px;
+  }
+  .warn-item::before{content:"!";flex:none;width:16px;height:16px;border-radius:50%;
+    background:#d2992233;color:var(--warn);font-size:11px;font-weight:700;display:grid;place-items:center;margin-top:1px}
+
+  /* ---------- metric cards ---------- */
+  /* 8 个指标固定 4 列 = 两行整齐；auto-fit 在宽屏会算出 6 列，导致末行大片空白 */
+  .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:11px;margin-bottom:26px}
+  .card{
+    background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);
+    padding:14px 15px;position:relative;overflow:hidden;transition:border-color .15s;
+  }
+  .card:hover{border-color:#3d444d}
+  .card.hero{background:linear-gradient(155deg,#171d26,#12171e);border-color:#243040}
+  .card-label{font-size:11.5px;color:var(--muted);letter-spacing:.35px;text-transform:uppercase;font-weight:500}
+  .card-value{
+    font-family:var(--mono);font-variant-numeric:tabular-nums;
+    font-size:25px;font-weight:600;letter-spacing:-.5px;margin-top:5px;color:var(--text);
+  }
+  .card.hero .card-value{font-size:38px;letter-spacing:-1.5px}
+  .card-hint{font-size:11.5px;color:var(--faint);margin-top:3px;font-variant-numeric:tabular-nums}
+  .bar{height:4px;border-radius:2px;background:var(--panel-3);margin-top:10px;overflow:hidden}
+  .bar-fill{height:100%;border-radius:2px;background:linear-gradient(90deg,var(--accent-dim),var(--accent));transition:width .4s ease}
+  .card-value.ok{color:var(--ok)}
+  .card-value.warn{color:var(--warn)}
+  .card-value.danger{color:var(--danger)}
+
+  /* ---------- panel ---------- */
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:12px;overflow:hidden}
+  .panel-head{
+    display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;
+    padding:14px 16px;border-bottom:1px solid var(--border-soft);background:var(--panel-2);
+  }
+  .panel-head h2{margin:0;font-size:14px;font-weight:600;display:flex;align-items:center;gap:9px}
+  .count-pill{font-family:var(--mono);font-size:11.5px;color:var(--muted);
+    background:var(--panel-3);border:1px solid var(--border);border-radius:999px;padding:1px 8px;font-weight:500}
+  .controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  #search{width:230px;max-width:46vw}
+
+  /* token bar */
+  .token-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;
+    padding:11px 16px;background:#0d1117;border-bottom:1px solid var(--border-soft)}
+  .token-bar input{flex:1;min-width:180px;font-family:var(--mono)}
+  .token-note{font-size:12px;color:var(--muted);width:100%;margin-top:-2px}
+
+  /* ---------- cache rows ---------- */
+  .cache-list{min-height:80px}
+  .row{
+    display:flex;gap:16px;align-items:flex-start;justify-content:space-between;
+    padding:13px 16px;border-bottom:1px solid var(--border-soft);transition:background .12s;
+  }
+  .row:last-child{border-bottom:none}
+  .row:hover{background:#12171e}
+  .row-main{min-width:0;flex:1}
+  .q{
+    font-size:13.5px;color:var(--text);font-weight:500;line-height:1.5;
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+    word-break:break-word;
+  }
+  .answer-line{display:flex;gap:7px;align-items:baseline;margin-top:5px;min-width:0}
+  .answer-line .lbl{font-size:11px;color:var(--faint);flex:none;letter-spacing:.3px}
+  .ans{
+    font-size:12.5px;color:var(--ok);font-family:var(--mono);word-break:break-all;
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+  }
+  .ans.empty{color:var(--faint);font-style:italic}
+  /* 固定列宽：题型 / 过期 / 置信度 / 命中 / 时间 / 删除。
+     flex 自然排列会让每列起点随内容宽度漂移（9 次 vs 12 次、5 分钟前 vs 45 天前），
+     整组元数据看起来是斜的。 */
+  .row-meta{
+    display:grid;
+    grid-template-columns:44px 40px 50px 56px 76px 56px;
+    align-items:center;
+    justify-items:center;
+    column-gap:10px;
+    flex:none;
+    padding-top:1px;
+  }
+  .row-meta > *{white-space:nowrap}
+  .tag{
+    font-size:11px;padding:1.5px 7px;border-radius:5px;border:1px solid;white-space:nowrap;
+    font-weight:500;letter-spacing:.2px;
+  }
+  .tag.single{color:#79c0ff;background:#1f6feb1f;border-color:#1f6feb44}
+  .tag.multiple{color:#d2a8ff;background:#8957e51f;border-color:#8957e544}
+  .tag.judgement{color:#7ee787;background:#3fb9501f;border-color:#3fb95044}
+  .tag.completion{color:#ffa657;background:#db6d281f;border-color:#db6d2844}
+  .tag.unknown{color:var(--muted);background:#6e76811f;border-color:#6e768144}
+  .tag.expired{color:var(--danger);background:#f851491f;border-color:#f8514944}
+  .meta-txt{font-size:11.5px;color:var(--faint);font-family:var(--mono);white-space:nowrap}
+
+  /* ---------- pager / empty ---------- */
+  .pager{display:flex;align-items:center;justify-content:space-between;gap:12px;
+    padding:12px 16px;border-top:1px solid var(--border-soft);background:var(--panel-2);flex-wrap:wrap}
+  .pager-info{font-size:12.5px;color:var(--muted);font-family:var(--mono)}
+  .pager-btns{display:flex;gap:7px;align-items:center}
+  .empty{padding:52px 20px;text-align:center;color:var(--muted);font-size:13.5px}
+  .empty .big{font-size:22px;display:block;margin-bottom:9px;opacity:.5}
+  .empty code{font-family:var(--mono);font-size:12px;color:var(--text-dim);background:var(--panel-3);padding:1px 5px;border-radius:4px}
+
+  /* ---------- toast ---------- */
+  #toast{
+    position:fixed;right:20px;bottom:20px;display:flex;flex-direction:column;gap:8px;
+    z-index:99;pointer-events:none;
+  }
+  .toast{
+    font-size:13px;padding:9px 15px;border-radius:8px;color:var(--text);
+    background:var(--panel-3);border:1px solid var(--border);
+    box-shadow:0 8px 24px -8px #000c;animation:slidein .18s ease;
+    max-width:min(420px,80vw);
+  }
+  .toast.err{background:#f851491f;border-color:#f8514966;color:#ffb4ab}
+  .toast.ok{background:#3fb9501f;border-color:#3fb95066;color:#7ee787}
+  @keyframes slidein{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+
+  footer{margin-top:22px;display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap;
+    font-size:11.5px;color:var(--faint);font-family:var(--mono)}
+  footer a{color:var(--muted);text-decoration:none;border-bottom:1px dotted #484f58}
+  footer a:hover{color:var(--accent)}
+
+  @media (max-width:920px){
+    .metrics{grid-template-columns:repeat(2,1fr)}
+  }
+  @media (max-width:640px){
+    body{padding:18px 13px 48px}
+    .row{flex-direction:column;gap:9px}
+    /* 窄屏堆叠后不需要列对齐，回到可换行的 flex 更省空间 */
+    .row-meta{display:flex;flex-wrap:wrap;gap:8px;width:100%;justify-items:initial}
+    #search{width:100%;max-width:none}
+    .controls{width:100%}
+  }
+  @media (max-width:520px){
+    .metrics{grid-template-columns:1fr}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="brand">
+      <div class="logo">◈</div>
+      <div>
+        <h1>OCS AI Tiku</h1>
+        <p class="sub" id="subline">搜题服务控制台</p>
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="status"><span class="dot" id="dot"></span><span id="statusText">连接中…</span></div>
+      <button class="btn" id="btnRefresh">刷新</button>
+    </div>
+  </header>
+
+  <div class="warnings" id="warnings" hidden></div>
+  <div class="metrics" id="metrics"></div>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>缓存题目 <span class="count-pill" id="totalPill">—</span></h2>
+      <div class="controls">
+        <input id="search" type="search" placeholder="搜索题干或答案…" autocomplete="off">
+        <select id="sort" title="排序方式">
+          <option value="recent">最近更新</option>
+          <option value="hits">命中最多</option>
+        </select>
+        <select id="size" title="每页条数">
+          <option value="20">20 / 页</option>
+          <option value="50">50 / 页</option>
+          <option value="100">100 / 页</option>
+        </select>
+        <button class="btn ghost" id="btnToken">令牌</button>
+      </div>
+    </div>
+
+    <div class="token-bar" id="tokenBar" hidden>
+      <input id="token" type="password" placeholder="X-API-Token" autocomplete="off" spellcheck="false">
+      <button class="btn" id="btnTokenSave">保存</button>
+      <button class="btn ghost" id="btnTokenClear">清除</button>
+      <div class="token-note">令牌只保存在本标签页（sessionStorage），关闭标签即失效；不会写入任何后端存储。</div>
+    </div>
+
+    <div class="cache-list" id="cacheList">
+      <div class="empty"><span class="big">◌</span>加载中…</div>
+    </div>
+    <div class="pager" id="pager" hidden>
+      <span class="pager-info" id="pagerInfo"></span>
+      <div class="pager-btns">
+        <button class="btn sm" id="btnPrev">上一页</button>
+        <button class="btn sm" id="btnNext">下一页</button>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span id="footerLeft">—</span>
+    <span><a href="/health" target="_blank" rel="noopener">/health</a> · <a href="/stats" target="_blank" rel="noopener">/stats</a> · <a href="/docs" target="_blank" rel="noopener">/docs</a></span>
+  </footer>
+</div>
+
+<div id="toast"></div>
+
+<script>
+"use strict";
+
+const S = {
+  page: 1, size: 20, q: "", sort: "recent",
+  token: sessionStorage.getItem("ocs_token") || "",
+  deleteEnabled: false,
+  timer: null,
+  loading: false,
+};
+
+const QTYPE_LABEL = {
+  single: "单选", multiple: "多选", judgement: "判断",
+  completion: "填空", unknown: "未知",
+};
+
+/* ---------- helpers ---------- */
+const $ = (id) => document.getElementById(id);
+
+function esc(v) {
+  return String(v == null ? "" : v).replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+}
+
+function num(n) {
+  if (n == null || Number.isNaN(n)) return "—";
+  return Number(n).toLocaleString("zh-CN");
+}
+
+function pct(v) {
+  if (v == null || Number.isNaN(v)) return "—";
+  return (Number(v) * 100).toFixed(1) + "%";
+}
+
+function dur(sec) {
+  sec = Math.max(0, Math.floor(Number(sec) || 0));
+  const d = Math.floor(sec / 86400);
+  const h = Math.floor((sec % 86400) / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  if (d) return `${d}d ${h}h`;
+  if (h) return `${h}h ${m}m`;
+  if (m) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function rel(ts) {
+  if (!ts) return "—";
+  const dt = Date.now() / 1000 - Number(ts);
+  if (dt < 0) return "刚刚";
+  if (dt < 60) return `${Math.floor(dt)} 秒前`;
+  if (dt < 3600) return `${Math.floor(dt / 60)} 分钟前`;
+  if (dt < 86400) return `${Math.floor(dt / 3600)} 小时前`;
+  return `${Math.floor(dt / 86400)} 天前`;
+}
+
+function absTime(ts) {
+  if (!ts) return "";
+  const d = new Date(Number(ts) * 1000);
+  const p = (x) => String(x).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function toast(msg, kind) {
+  const box = document.createElement("div");
+  box.className = "toast" + (kind ? " " + kind : "");
+  box.textContent = msg;
+  $("toast").appendChild(box);
+  setTimeout(() => {
+    box.style.transition = "opacity .3s";
+    box.style.opacity = "0";
+    setTimeout(() => box.remove(), 320);
+  }, 2600);
+}
+
+async function api(path, opts) {
+  const o = Object.assign({}, opts || {});
+  const headers = Object.assign({ "Content-Type": "application/json" }, o.headers || {});
+  if (S.token) headers["X-API-Token"] = S.token;
+  o.headers = headers;
+
+  let res;
+  try {
+    res = await fetch(path, o);
+  } catch (e) {
+    throw Object.assign(new Error("无法连接服务"), { status: 0 });
+  }
+  let data = {};
+  try { data = await res.json(); } catch (e) { /* 非 JSON */ }
+  if (!res.ok) {
+    throw Object.assign(new Error(data.message || `HTTP ${res.status}`), {
+      status: res.status, data,
+    });
+  }
+  return data;
+}
+
+function setStatus(ok, text) {
+  const dot = $("dot");
+  dot.className = "dot " + (ok ? "on" : "off");
+  $("statusText").textContent = text;
+}
+
+/* ---------- dashboard ---------- */
+function metric(label, value, hint, cls, hero) {
+  return `<div class="card${hero ? " hero" : ""}">
+    <div class="card-label">${esc(label)}</div>
+    <div class="card-value${cls ? " " + cls : ""}">${value}</div>
+    ${hint ? `<div class="card-hint">${hint}</div>` : ""}
+  </div>`;
+}
+
+function renderMetrics(d) {
+  const st = d.stats || {};
+  const cv = d.cache || {};
+  const dv = d.derived || {};
+  const rows = cv.max_rows ? Math.min(1, (cv.rows || 0) / cv.max_rows) : 0;
+  const rowTone = rows > 0.95 ? "danger" : rows > 0.8 ? "warn" : "";
+
+  // 命中率配色跟着实际值走：有请求却 0 命中说明缓存没起作用，不该显示成绿色
+  const reqs = st.requests || 0;
+  const hitRate = dv.hit_rate || 0;
+  const hitTone = reqs === 0 ? "" : hitRate >= 0.5 ? "ok" : hitRate > 0 ? "warn" : "danger";
+
+  $("subline").textContent = `${d.model} · effort ${d.effort}`;
+
+  $("metrics").innerHTML = [
+    metric("缓存命中率", pct(hitRate),
+      `${num(st.cache_hit)} 命中 / ${num(reqs)} 请求`, hitTone, true),
+    metric("运行时长", dur(d.uptime), `启动于 ${esc(absTime(d.started_at))}`),
+    metric("缓存条数", num(cv.rows),
+      `上限 ${num(cv.max_rows)} · ${pct(rows)} 已用`, rowTone),
+    metric("AI 调用", num(st.ai_calls), `占请求 ${pct(dv.ai_rate)}`),
+    metric("总命中次数", num(cv.total_hits),
+      cv.pending_hits ? `含待落盘 ${num(cv.pending_hits)}` : `TTL ${num(cv.ttl_days)} 天`),
+    metric("空答案", num(st.empty), `占请求 ${pct(dv.empty_rate)}`,
+      (st.empty || 0) > 0 ? "warn" : ""),
+    metric("错误", num(st.errors), `占请求 ${pct(dv.error_rate)}`,
+      (st.errors || 0) > 0 ? "danger" : ""),
+    metric("缓存开关", cv.enabled ? "启用" : "关闭",
+      cv.enabled ? `TTL ${num(cv.ttl_days)} 天` : "命中与写入均已停用",
+      cv.enabled ? "" : "warn"),
+  ].join("");
+
+  // 缓存占用进度条挂在「缓存条数」卡片里
+  const card = $("metrics").children[2];
+  if (card) {
+    const bar = document.createElement("div");
+    bar.className = "bar";
+    bar.innerHTML = `<div class="bar-fill" style="width:${(rows * 100).toFixed(1)}%"></div>`;
+    card.appendChild(bar);
+  }
+
+  renderWarnings(d.warnings || []);
+  $("footerLeft").textContent =
+    `缓存 ${num(cv.rows)} 条 · 命中 ${num(cv.total_hits)} 次 · 运行 ${dur(d.uptime)}`;
+}
+
+function renderWarnings(list) {
+  const box = $("warnings");
+  if (!list.length) { box.hidden = true; box.innerHTML = ""; return; }
+  box.hidden = false;
+  box.innerHTML = list.map((w) => `<div class="warn-item">${esc(w)}</div>`).join("");
+}
+
+async function loadDashboard() {
+  try {
+    const d = await api("/api/dashboard");
+    S.deleteEnabled = !!(d.admin && d.admin.delete_enabled);
+    renderMetrics(d);
+    setStatus(true, "服务正常");
+    syncDeleteButtons();
+  } catch (e) {
+    setStatus(false, e.status === 0 ? "无法连接" : "异常");
+    if (e.status) toast(e.message, "err");
+  }
+}
+
+/* ---------- cache list ---------- */
+function rowHtml(it) {
+  const qtype = QTYPE_LABEL[it.qtype] || QTYPE_LABEL.unknown;
+  const answer = (it.answer || "").trim();
+  const hasConf = typeof it.confidence === "number";
+
+  // 六个格子恒定输出，缺内容的用空 span 占位，否则 grid 列会错位
+  return `<div class="row" data-key="${esc(it.key)}">
+    <div class="row-main">
+      <div class="q" title="${esc(it.question)}">${esc(it.question || "(无题干)")}</div>
+      <div class="answer-line">
+        <span class="lbl">答案</span>
+        <span class="ans${answer ? "" : " empty"}" title="${esc(answer)}">${esc(answer || "（空）")}</span>
+      </div>
+    </div>
+    <div class="row-meta">
+      <span class="tag ${esc(it.qtype || "unknown")}">${esc(qtype)}</span>
+      <span>${it.expired ? '<span class="tag expired">过期</span>' : ""}</span>
+      <span class="meta-txt" title="${hasConf ? "置信度" : ""}">${hasConf ? pct(it.confidence) : ""}</span>
+      <span class="meta-txt" title="命中次数">${num(it.hits)} 次</span>
+      <span class="meta-txt" title="${esc(absTime(it.created_at))}">${esc(rel(it.created_at))}</span>
+      <button class="btn sm danger js-del" data-key="${esc(it.key)}">删除</button>
+    </div>
+  </div>`;
+}
+
+function renderCache(d) {
+  const box = $("cacheList");
+  $("totalPill").textContent = num(d.total) + " 条";
+
+  if (!d.items || !d.items.length) {
+    box.innerHTML = `<div class="empty"><span class="big">◌</span>${
+      S.q ? `没有匹配 <code>${esc(S.q)}</code> 的缓存` : "还没有缓存题目<br>脚本跑过几道题后这里就会有内容"
+    }</div>`;
+    $("pager").hidden = true;
+    return;
+  }
+
+  box.innerHTML = d.items.map(rowHtml).join("");
+  $("pager").hidden = false;
+
+  const from = (d.page - 1) * d.size + 1;
+  const to = Math.min(d.total, d.page * d.size);
+  $("pagerInfo").textContent = `${num(from)}–${num(to)} / 共 ${num(d.total)} 条 · 第 ${num(d.page)} / ${num(d.pages)} 页`;
+  $("btnPrev").disabled = d.page <= 1;
+  $("btnNext").disabled = d.page >= d.pages;
+  syncDeleteButtons();
+}
+
+function syncDeleteButtons() {
+  const btns = document.querySelectorAll(".js-del");
+  btns.forEach((b) => {
+    if (!S.deleteEnabled) {
+      b.disabled = true;
+      b.title = "未配置 OCS_API_TOKEN，删除接口已关闭";
+    } else if (!S.token) {
+      b.disabled = false;
+      b.title = "需要先填入令牌";
+    } else {
+      b.disabled = false;
+      b.title = "删除这条缓存";
+    }
+  });
+}
+
+async function loadCache() {
+  if (S.loading) return;
+  S.loading = true;
+  try {
+    const qs = new URLSearchParams({
+      page: S.page, size: S.size, q: S.q, sort: S.sort,
+    });
+    const d = await api("/api/cache?" + qs.toString());
+    renderCache(d);
+  } catch (e) {
+    $("cacheList").innerHTML =
+      `<div class="empty"><span class="big">⚠</span>${esc(e.message)}</div>`;
+    $("pager").hidden = true;
+  } finally {
+    S.loading = false;
+  }
+}
+
+async function deleteItem(key, btn) {
+  if (!S.deleteEnabled) {
+    toast("未配置 OCS_API_TOKEN，删除接口已关闭", "err");
+    return;
+  }
+  if (!S.token) {
+    openTokenBar();
+    toast("请先填入 X-API-Token", "err");
+    return;
+  }
+  const row = btn.closest(".row");
+  const q = row ? (row.querySelector(".q")?.textContent || "").slice(0, 40) : "";
+  if (!confirm(`删除这条缓存？\n\n${q}`)) return;
+
+  btn.disabled = true;
+  btn.textContent = "…";
+  try {
+    await api("/api/cache/" + encodeURIComponent(key), { method: "DELETE" });
+    toast("已删除", "ok");
+    await Promise.all([loadCache(), loadDashboard()]);
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = "删除";
+    if (e.status === 401) {
+      toast("令牌无效，请重新填入", "err");
+      openTokenBar();
+    } else if (e.status === 403) {
+      toast(e.data?.message || "删除已被服务端关闭", "err");
+    } else {
+      toast(e.message, "err");
+    }
+  }
+}
+
+/* ---------- token ---------- */
+function openTokenBar() {
+  $("tokenBar").hidden = false;
+  $("token").value = S.token;
+  $("token").focus();
+}
+
+$("btnToken").onclick = () => {
+  $("tokenBar").hidden = !$("tokenBar").hidden;
+  if (!$("tokenBar").hidden) { $("token").value = S.token; $("token").focus(); }
+};
+
+$("btnTokenSave").onclick = () => {
+  S.token = $("token").value.trim();
+  if (S.token) sessionStorage.setItem("ocs_token", S.token);
+  else sessionStorage.removeItem("ocs_token");
+  toast(S.token ? "令牌已保存到本标签页" : "令牌已清空", "ok");
+  $("tokenBar").hidden = true;
+  syncDeleteButtons();
+};
+
+$("btnTokenClear").onclick = () => {
+  S.token = "";
+  sessionStorage.removeItem("ocs_token");
+  $("token").value = "";
+  toast("令牌已清空", "ok");
+  syncDeleteButtons();
+};
+
+/* ---------- wiring ---------- */
+$("btnRefresh").onclick = () => { loadDashboard(); loadCache(); };
+
+let searchTimer = null;
+$("search").oninput = (e) => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    S.q = e.target.value.trim();
+    S.page = 1;
+    loadCache();
+  }, 320);
+};
+
+$("sort").onchange = (e) => { S.sort = e.target.value; S.page = 1; loadCache(); };
+$("size").onchange = (e) => { S.size = Number(e.target.value) || 20; S.page = 1; loadCache(); };
+$("btnPrev").onclick = () => { if (S.page > 1) { S.page--; loadCache(); } };
+$("btnNext").onclick = () => { S.page++; loadCache(); };
+
+$("cacheList").addEventListener("click", (e) => {
+  const btn = e.target.closest(".js-del");
+  if (btn) deleteItem(btn.dataset.key, btn);
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "/" && document.activeElement !== $("search")) {
+    e.preventDefault();
+    $("search").focus();
+  }
+});
+
+/* 首次加载 + 每 10 秒刷新看板 */
+loadDashboard();
+loadCache();
+S.timer = setInterval(loadDashboard, 10000);
+</script>
+</body>
+</html>
