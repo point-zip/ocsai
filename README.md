@@ -153,7 +153,8 @@ OCS 的连接探测 `probeAnswerer` 先发 **HEAD**，遇到 `405/501` 才退回
 | `OCS_USE_JSON_SCHEMA` | `true` | 网关不支持结构化输出时设 `false` |
 | `OCS_HOST` | `127.0.0.1` | 监听地址，默认仅本机 |
 | `OCS_PORT` | `6767` | 端口 |
-| `OCS_API_TOKEN` | 空 | 访问令牌。设了才解锁删除缓存；对外开放时**必须**设置 |
+| `OCS_API_TOKEN` | 空 | 可选的 `/solve` 令牌。留空即不校验，本机自用推荐留空 |
+| `OCS_ADMIN_TOKEN` | 空 | 独立的管理令牌，只用于删除缓存。留空 = 删除功能关闭 |
 | `OCS_MIN_CONFIDENCE` | `0.55` | 低于该置信度直接 `ok:false`，宁可不填也不填错 |
 | `OCS_MAX_IMAGES` | `6` | 单题最多图片数，超限整体拒绝 |
 | `OCS_MAX_IMAGE_KB` | `4096` | 单张图片大小上限（KB），超限整体拒绝 |
@@ -209,7 +210,10 @@ OCS 的连接探测 `probeAnswerer` 先发 **HEAD**，遇到 `405/501` 才退回
 ```ini
 OCS_HOST=127.0.0.1
 OCS_PORT=6767
+# 可选：给 /solve 加令牌，脚本需同步带 header
 OCS_API_TOKEN=换成随机串
+# 删除缓存用的管理令牌，与上面互不影响
+OCS_ADMIN_TOKEN=再换一个随机串
 ```
 
 只监听回环，由 nginx 对外：
@@ -239,6 +243,24 @@ location /ocs-solve {
 }
 ```
 
+**管理面板别直接反代到公网**。`GET /api/cache` 是只读的、不带鉴权，
+谁都能看到缓存里的题干和答案。远端要用面板就走 SSH 隧道：
+
+```bash
+ssh -L 6767:127.0.0.1:6767 user@你的服务器
+# 然后本地打开 http://127.0.0.1:6767/
+```
+
+真要对外暴露面板，至少在 nginx 上套一层 basic auth：
+
+```nginx
+location / {
+    auth_basic           "ocs admin";
+    auth_basic_user_file /etc/nginx/.htpasswd;
+    proxy_pass           http://127.0.0.1:6767;
+}
+```
+
 ---
 
 ## 接口
@@ -252,7 +274,7 @@ location /ocs-solve {
 | GET | `/stats` | 缓存与调用统计 |
 | GET | `/api/dashboard` | 看板数据（运行时统计 + 缓存概况） |
 | GET | `/api/cache` | 缓存分页浏览，支持 `page` `size` `q` `sort` |
-| DELETE | `/api/cache/{key}` | 删除单条缓存，**需要 token** |
+| DELETE | `/api/cache/{key}` | 删除单条缓存，需要 `OCS_ADMIN_TOKEN` |
 
 `POST /solve` 请求：
 
@@ -287,11 +309,11 @@ location /ocs-solve {
 
 | 服务端配置 | 请求头 | 结果 |
 |---|---|---|
-| 未设 `OCS_API_TOKEN` | 任意 | `403 admin_disabled`，删除能力整体关闭 |
-| 设了 token | 缺 token / token 错 | `401 unauthorized` |
-| 设了 token | `X-API-Token` 或 `Authorization: Bearer` 正确 | `200`，`deleted: 1` |
-| 设了 token | key 不是 64 位 hex | `400 bad_key` |
-| 设了 token | key 合法但不存在 | `404 not_found` |
+| 未设 `OCS_ADMIN_TOKEN` | 任意 | `403 admin_disabled`，删除能力整体关闭 |
+| 设了 | 缺令牌 / 令牌错 | `401 unauthorized` |
+| 设了 | `X-API-Token` 或 `Authorization: Bearer` 正确 | `200`，`deleted: 1` |
+| 设了 | key 不是 64 位 hex | `400 bad_key` |
+| 设了 | key 合法但不存在 | `404 not_found` |
 
 ---
 
@@ -313,14 +335,18 @@ location /ocs-solve {
 **缓存题目浏览**：按最近更新或命中次数排序，支持搜索题干/答案、分页（20/50/100 每页）。
 每行显示题型、答案、置信度、命中次数、创建时间和过期标记（超出 TTL 的行命中路径不会再用到）。
 
-**删除单条缓存**：点「令牌」填入 `OCS_API_TOKEN` 的值，之后每行的「删除」按钮才可用。
+**删除单条缓存**：点「令牌」填入 `.env` 里 `OCS_ADMIN_TOKEN` 的值，之后每行的「删除」按钮才可用。
 
 - 令牌只存在当前标签页的 `sessionStorage`，关闭即失效，后端不做任何持久化
-- 服务端没配 `OCS_API_TOKEN` 时，删除按钮被禁用，接口直接返回 `403`
+- 服务端没配 `OCS_ADMIN_TOKEN` 时，删除按钮被禁用，接口直接返回 `403`
 - 删除是幂等的：重复删除同一条会得到 `404`，不会报错崩溃
 
-> 站在安全角度：**没设 token 就别把服务暴露到公网**。`/solve` 在无 token 时是放行的
-> （脚本连接探测需要），删除接口则始终要求 token，两者刻意分开。
+> **三个概念别混**：`OCS_API_KEY` 是调 AI 用的（必填）；`OCS_API_TOKEN` 是可选的
+> `/solve` 令牌，留空就不校验，脚本完全不用改；`OCS_ADMIN_TOKEN` 只解锁删除缓存。
+> 三者互不影响——设了管理令牌不会让脚本开始 401。
+>
+> 另外 `/solve` 在无令牌时是放行的，这是为了让脚本的连接探测能直接work。
+> 所以**没设 `OCS_API_TOKEN` 就别把服务暴露到公网**，任何人都能消耗你的 AI 额度。
 
 ---
 
@@ -399,8 +425,8 @@ python test_script_sim.py   # 全链路：模拟脚本占位符替换 + handler 
 | 一直返回 `index_out_of_range` | AI 给出了页面不存在的选项字母，看日志里的 `letters=` |
 | 一直返回 `low_confidence` | AI 对该题没把握，可调低 `OCS_MIN_CONFIDENCE` |
 | 返回 `too_many_images` / `image_too_large` | 图片超限，调 `OCS_MAX_IMAGES` / `OCS_MAX_IMAGE_KB` |
-| 管理页删除按钮是灰的 | 服务端没配 `OCS_API_TOKEN`，删除接口整体关闭 |
-| 点删除提示「令牌无效」 | 填的 token 与 `OCS_API_TOKEN` 不一致，点「令牌」重填 |
+| 管理页删除按钮是灰的 | 服务端没配 `OCS_ADMIN_TOKEN`，删除接口整体关闭 |
+| 点删除提示「管理令牌无效」 | 填的令牌与 `OCS_ADMIN_TOKEN` 不一致，点「令牌」重填 |
 | 打开 `/` 只有一行 JSON | `static/index.html` 不在，面板未部署 |
 | 图片题搜不到 | 模型不支持图片，或脚本「图片题优化」没开 |
 | `Mixed Content` 报错 | 用了 `fetch` 而不是 `GM_xmlhttpRequest` |

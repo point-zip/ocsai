@@ -113,6 +113,10 @@
     padding:11px 16px;background:#0d1117;border-bottom:1px solid var(--border-soft)}
   .token-bar input{flex:1;min-width:180px;font-family:var(--mono)}
   .token-note{font-size:12px;color:var(--muted);width:100%;margin-top:-2px}
+  .token-note code{
+    font-family:var(--mono);font-size:11.5px;color:var(--text-dim);
+    background:var(--panel-3);padding:1px 5px;border-radius:4px;
+  }
 
   /* ---------- cache rows ---------- */
   .cache-list{min-height:80px}
@@ -244,10 +248,10 @@
     </div>
 
     <div class="token-bar" id="tokenBar" hidden>
-      <input id="token" type="password" placeholder="X-API-Token" autocomplete="off" spellcheck="false">
+      <input id="token" type="password" placeholder="管理令牌 OCS_ADMIN_TOKEN" autocomplete="off" spellcheck="false">
       <button class="btn" id="btnTokenSave">保存</button>
       <button class="btn ghost" id="btnTokenClear">清除</button>
-      <div class="token-note">令牌只保存在本标签页（sessionStorage），关闭标签即失效；不会写入任何后端存储。</div>
+      <div class="token-note">填服务端 .env 里的 <code>OCS_ADMIN_TOKEN</code>，只用于删除缓存，与解题无关。令牌只存在本标签页（sessionStorage），关闭即失效，后端不做任何持久化。</div>
     </div>
 
     <div class="cache-list" id="cacheList">
@@ -503,10 +507,10 @@ function syncDeleteButtons() {
   btns.forEach((b) => {
     if (!S.deleteEnabled) {
       b.disabled = true;
-      b.title = "未配置 OCS_API_TOKEN，删除接口已关闭";
+      b.title = "未配置 OCS_ADMIN_TOKEN，删除接口已关闭";
     } else if (!S.token) {
       b.disabled = false;
-      b.title = "需要先填入令牌";
+      b.title = "需要先填入管理令牌";
     } else {
       b.disabled = false;
       b.title = "删除这条缓存";
@@ -534,12 +538,12 @@ async function loadCache() {
 
 async function deleteItem(key, btn) {
   if (!S.deleteEnabled) {
-    toast("未配置 OCS_API_TOKEN，删除接口已关闭", "err");
+    toast("未配置 OCS_ADMIN_TOKEN，删除接口已关闭", "err");
     return;
   }
   if (!S.token) {
     openTokenBar();
-    toast("请先填入 X-API-Token", "err");
+    toast("请先填入管理令牌 OCS_ADMIN_TOKEN", "err");
     return;
   }
   const row = btn.closest(".row");
@@ -556,7 +560,7 @@ async function deleteItem(key, btn) {
     btn.disabled = false;
     btn.textContent = "删除";
     if (e.status === 401) {
-      toast("令牌无效，请重新填入", "err");
+      toast("管理令牌无效，请重新填入", "err");
       openTokenBar();
     } else if (e.status === 403) {
       toast(e.data?.message || "删除已被服务端关闭", "err");

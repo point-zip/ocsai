@@ -16,6 +16,7 @@ import atexit
 import json
 import logging
 import re
+import secrets
 import time
 from pathlib import Path
 from typing import Any
@@ -81,20 +82,46 @@ STATS = {"requests": 0, "cache_hit": 0, "ai_calls": 0, "errors": 0, "empty": 0}
 atexit.register(cache.flush)
 
 
-def _auth_ok(request: Request) -> bool:
-    if not settings.api_token:
-        return True
+def _extract_token(request: Request) -> str:
+    """从请求头取令牌：X-API-Token / X-OCS-Token / Authorization: Bearer。"""
     token = (
         request.headers.get("x-api-token")
         or request.headers.get("x-ocs-token")
         or ""
     )
-    if token == settings.api_token:
-        return True
+    if token:
+        return token.strip()
     authz = request.headers.get("authorization", "")
     if authz.lower().startswith("bearer "):
-        return authz[7:].strip() == settings.api_token
-    return False
+        return authz[7:].strip()
+    return ""
+
+
+def _const_eq(a: str, b: str) -> bool:
+    """常量时间比较，避免按字节提前返回泄露前缀。"""
+    return secrets.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
+
+def _auth_ok(request: Request) -> bool:
+    """脚本调用 /solve 的鉴权。
+
+    OCS_API_TOKEN 为空 = 不校验（本机自用默认）。它和删除用的令牌是两回事：
+    这个管「谁能解题」，OCS_ADMIN_TOKEN 管「谁能删缓存」。
+    """
+    if not settings.api_token:
+        return True
+    return _const_eq(_extract_token(request), settings.api_token)
+
+
+def _admin_ok(request: Request) -> bool:
+    """管理操作的鉴权。
+
+    OCS_ADMIN_TOKEN 为空 = 删除能力整体关闭（不是「谁都能删」）。
+    刻意不复用 OCS_API_TOKEN：否则一开删除就把脚本也锁在门外了。
+    """
+    if not settings.admin_token:
+        return False
+    return _const_eq(_extract_token(request), settings.admin_token)
 
 
 async def _read_body(request: Request) -> dict[str, Any]:
@@ -355,8 +382,8 @@ def api_dashboard() -> dict[str, Any]:
             "max_rows": settings.cache_max_rows,
         },
         "admin": {
-            # 没配 token 就不开放删除：管理操作不能和无鉴权的 /solve 共用一套放行规则
-            "delete_enabled": bool(settings.api_token),
+            # 删除能力只看 OCS_ADMIN_TOKEN，与 /solve 的 OCS_API_TOKEN 无关
+            "delete_enabled": bool(settings.admin_token),
         },
         "warnings": settings.validate(),
     }
@@ -389,19 +416,19 @@ def api_cache_list(
 
 @app.delete("/api/cache/{key}")
 def api_cache_delete(key: str, request: Request) -> JSONResponse:
-    """删除单条缓存。要求已配置 OCS_API_TOKEN 且请求携带正确 token。"""
-    if not settings.api_token:
+    """删除单条缓存。只认 OCS_ADMIN_TOKEN，与 /solve 的鉴权完全独立。"""
+    if not settings.admin_token:
         return _JSON(
             {
                 "ok": False,
                 "reason": "admin_disabled",
-                "message": "未配置 OCS_API_TOKEN，删除接口已关闭",
+                "message": "未配置 OCS_ADMIN_TOKEN，删除接口已关闭",
             },
             status_code=403,
         )
-    if not _auth_ok(request):
+    if not _admin_ok(request):
         return _JSON(
-            {"ok": False, "reason": "unauthorized", "message": "token 无效"},
+            {"ok": False, "reason": "unauthorized", "message": "管理令牌无效"},
             status_code=401,
         )
     if not _CACHE_KEY_RE.match(key):

@@ -64,6 +64,7 @@ class Settings:
     host: str
     port: int
     api_token: str
+    admin_token: str
     min_confidence: float
     max_images: int
     max_image_kb: int
@@ -110,6 +111,7 @@ def load_settings() -> Settings:
         host=_s("OCS_HOST", "127.0.0.1"),
         port=_i("OCS_PORT", 6767),
         api_token=_s("OCS_API_TOKEN", ""),
+        admin_token=_s("OCS_ADMIN_TOKEN", ""),
         min_confidence=_f("OCS_MIN_CONFIDENCE", 0.55),
         max_images=_i("OCS_MAX_IMAGES", 6),
         max_image_kb=_i("OCS_MAX_IMAGE_KB", 4096),
