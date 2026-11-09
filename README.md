@@ -33,8 +33,8 @@ AI 只返回选项字母  letters: ["B"]
 ## 快速开始
 
 ```bash
-git clone https://github.com/USERNAME/ocs-ai-tiku.git
-cd ocs-ai-tiku
+git clone https://github.com/point-zip/ocsai.git
+cd ocsai
 
 # 用 uv（推荐）
 uv venv --python 3.12 .venv
