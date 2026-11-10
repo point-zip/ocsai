@@ -183,6 +183,28 @@ def _validate_images(images: list[str]) -> str | None:
     return None
 
 
+def _is_meaningful_answer(answer: Any) -> bool:
+    """答案是否有实质内容。
+
+    `json.dumps([])` 产出的是 "[]"——一个**非空**字符串，能骗过
+    `if not answer_text` 的判断，被当成成功答案写进缓存。这里把
+    空串、全空白、空 JSON 数组都判为无效。
+    """
+    if not isinstance(answer, str):
+        return False
+    a = answer.strip()
+    if not a:
+        return False
+    if a.startswith("["):
+        try:
+            v = json.loads(a)
+        except (json.JSONDecodeError, ValueError):
+            return True  # 不是合法 JSON，当普通文本处理
+        if isinstance(v, list):
+            return any(str(x).strip() for x in v)
+    return True
+
+
 async def _solve(title: str, options_raw: str, qtype: str, images: list[str]) -> dict[str, Any]:
     options = split_options(options_raw)
     qtype = (qtype or "").strip().lower()
@@ -192,10 +214,16 @@ async def _solve(title: str, options_raw: str, qtype: str, images: list[str]) ->
     # 缓存是同步 SQLite，丢线程池：不能在事件循环里 fsync 阻塞整个服务。
     cached = await asyncio.to_thread(cache.get, title, options, qtype, images)
     if cached is not None:
-        STATS["cache_hit"] += 1
-        cached = dict(cached)
-        cached["cached"] = True
-        return cached
+        if _is_meaningful_answer(cached.get("answer")):
+            STATS["cache_hit"] += 1
+            cached = dict(cached)
+            cached["cached"] = True
+            return cached
+        # 旧版本把空答案当成功写过缓存，命中后直接返回等于这题永远答不出。
+        # 删掉这条脏记录，当作未命中重新作答。
+        log.info("丢弃历史空答案缓存: %s", title[:40])
+        stale_key = cache.make_key(title, options, qtype, images)
+        await asyncio.to_thread(cache.delete, stale_key)
 
     try:
         STATS["ai_calls"] += 1
@@ -238,9 +266,10 @@ async def _solve(title: str, options_raw: str, qtype: str, images: list[str]) ->
 
     if qtype == "completion":
         if isinstance(blanks, list) and blanks:
-            answer_text = json.dumps(
-                [str(b).strip() for b in blanks if str(b).strip()], ensure_ascii=False
-            )
+            parts = [str(b).strip() for b in blanks if str(b).strip()]
+            # 过滤后为空就别 json.dumps 了，否则产出 "[]" 这个「非空但无内容」的串
+            if parts:
+                answer_text = json.dumps(parts, ensure_ascii=False)
     else:
         letter_str = ""
         if isinstance(letters, list):
@@ -269,14 +298,17 @@ async def _solve(title: str, options_raw: str, qtype: str, images: list[str]) ->
                 if qtype == "judgement":
                     answer_text = resolve_judgement(picked[0]) or ""
                 elif qtype == "multiple":
-                    answer_text = MULTI_SEP.join(picked)
+                    # 选项里可能有空行（split_options 保留结构），全空时别 join 出 "==="
+                    filled = [p for p in picked if p.strip()]
+                    if filled:
+                        answer_text = MULTI_SEP.join(filled)
                 else:
                     answer_text = picked[0]
 
         if not answer_text and isinstance(blanks, list) and blanks:
             answer_text = build_answer_string(qtype, str(blanks[0]), options)
 
-    if not answer_text:
+    if not _is_meaningful_answer(answer_text):
         STATS["empty"] += 1
         return {"ok": False, "reason": "unmatched"}
 
