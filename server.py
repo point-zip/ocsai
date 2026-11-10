@@ -61,6 +61,10 @@ logging.basicConfig(
 )
 log = logging.getLogger("server")
 
+# httpx 对每个请求都打一条 INFO，并发时会把业务日志整屏刷掉
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 app = FastAPI(
     title="OCS AI Tiku",
     version="1.0.0",
