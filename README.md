@@ -92,7 +92,7 @@ curl http://127.0.0.1:6767/health
 [
   {
     "name": "AI 搜题",
-    "homepage": "http://127.0.0.1:6767/",
+    "homepage": "http://127.0.0.1:6767",
     "url": "http://127.0.0.1:6767/solve",
     "method": "post",
     "type": "GM_xmlhttpRequest",
