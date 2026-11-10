@@ -80,7 +80,23 @@ app.add_middleware(
 )
 
 START_TS = time.time()
-STATS = {"requests": 0, "cache_hit": 0, "ai_calls": 0, "errors": 0, "empty": 0}
+STATS_KEYS = ("requests", "cache_hit", "ai_calls", "errors", "empty")
+# 本进程计数（"本次运行"）。累计值走 cache 的 counters 表，重启不丢。
+STATS: dict[str, int] = {k: 0 for k in STATS_KEYS}
+
+
+def _stat(name: str, n: int = 1) -> None:
+    """计数一次：内存给本次运行用，同时累加进持久化的 counters。"""
+    STATS[name] = STATS.get(name, 0) + n
+    cache.bump(name, n)
+
+
+def _counters() -> tuple[dict[str, int], dict[str, int]]:
+    """返回 (累计, 本次运行)。累计缺省项补 0，兼容老的 cache 库。"""
+    cumulative = cache.read_counters()
+    for k in STATS_KEYS:
+        cumulative.setdefault(k, 0)
+    return cumulative, dict(STATS)
 
 # 命中计数攒批写盘，退出时兜底刷一次，别把最后几十次命中丢了
 atexit.register(cache.flush)
@@ -215,7 +231,7 @@ async def _solve(title: str, options_raw: str, qtype: str, images: list[str]) ->
     cached = await asyncio.to_thread(cache.get, title, options, qtype, images)
     if cached is not None:
         if _is_meaningful_answer(cached.get("answer")):
-            STATS["cache_hit"] += 1
+            _stat("cache_hit")
             cached = dict(cached)
             cached["cached"] = True
             return cached
@@ -226,23 +242,23 @@ async def _solve(title: str, options_raw: str, qtype: str, images: list[str]) ->
         await asyncio.to_thread(cache.delete, stale_key)
 
     try:
-        STATS["ai_calls"] += 1
+        _stat("ai_calls")
         payload = await ask_ai(title, options, qtype, images)
     except httpx.TimeoutException:
-        STATS["errors"] += 1
+        _stat("errors")
         log.warning("AI 超时 %ss，题目: %s", settings.ai_timeout, title[:40])
         return {"ok": False, "reason": "timeout"}
     except httpx.HTTPError as e:
-        STATS["errors"] += 1
+        _stat("errors")
         log.error("AI 网络错误: %s", e)
         return {"ok": False, "reason": "network"}
     except Exception as e:  # noqa: BLE001
-        STATS["errors"] += 1
+        _stat("errors")
         log.exception("AI 调用异常: %s", e)
         return {"ok": False, "reason": "exception"}
 
     if not payload:
-        STATS["empty"] += 1
+        _stat("empty")
         return {"ok": False, "reason": "no_payload"}
 
     confidence = payload.get("confidence")
@@ -251,7 +267,7 @@ async def _solve(title: str, options_raw: str, qtype: str, images: list[str]) ->
         confidence = 0.0
     confidence = float(confidence)
     if confidence < settings.min_confidence:
-        STATS["empty"] += 1
+        _stat("empty")
         log.info(
             "置信度 %.2f 低于阈值 %.2f，拒绝作答: %s",
             confidence,
@@ -284,7 +300,7 @@ async def _solve(title: str, options_raw: str, qtype: str, images: list[str]) ->
             if out_of_range:
                 # AI 幻觉出页面不存在的字母。宁可判失败也不要给半截答案：
                 # 多选题丢一项必然判错，单选题错位会填错选项。
-                STATS["empty"] += 1
+                _stat("empty")
                 log.warning(
                     "AI 返回越界字母 letters=%s idxs=%s 选项数=%d，题目: %s",
                     letter_str,
@@ -309,7 +325,7 @@ async def _solve(title: str, options_raw: str, qtype: str, images: list[str]) ->
             answer_text = build_answer_string(qtype, str(blanks[0]), options)
 
     if not _is_meaningful_answer(answer_text):
-        STATS["empty"] += 1
+        _stat("empty")
         return {"ok": False, "reason": "unmatched"}
 
     result = {
@@ -342,7 +358,7 @@ async def solve_probe() -> dict[str, Any]:
 
 @app.post("/solve")
 async def solve(request: Request) -> JSONResponse:
-    STATS["requests"] += 1
+    _stat("requests")
 
     if not _auth_ok(request):
         return _JSON({"ok": False, "reason": "unauthorized"}, status_code=401)
@@ -358,7 +374,7 @@ async def solve(request: Request) -> JSONResponse:
 
     bad_images = _validate_images(images)
     if bad_images:
-        STATS["errors"] += 1
+        _stat("errors")
         log.warning(
             "拒绝请求 %s: imgs=%d (上限 %d 张 / %d KB)",
             bad_images,
@@ -391,9 +407,14 @@ def root() -> Response:
 
 @app.get("/api/dashboard")
 def api_dashboard() -> dict[str, Any]:
-    """看板数据：运行时统计 + 缓存概况 + 管理能力开关。"""
+    """看板数据。
+
+    stats 是跨重启的累计值（持久化在 counters 表），session 是本次进程的，
+    命中率等比率一律按累计算——重启后归零的比率没有参考意义。
+    """
     cache_stats = cache.stats()
-    requests = STATS["requests"]
+    cumulative, session = _counters()
+    requests = cumulative["requests"]
 
     def rate(n: int) -> float:
         return round(n / requests, 4) if requests else 0.0
@@ -405,12 +426,13 @@ def api_dashboard() -> dict[str, Any]:
         "uptime": round(time.time() - START_TS, 1),
         "model": settings.model,
         "effort": settings.reasoning_effort,
-        "stats": dict(STATS),
+        "stats": cumulative,
+        "session": session,
         "derived": {
-            "hit_rate": rate(STATS["cache_hit"]),
-            "ai_rate": rate(STATS["ai_calls"]),
-            "empty_rate": rate(STATS["empty"]),
-            "error_rate": rate(STATS["errors"]),
+            "hit_rate": rate(cumulative["cache_hit"]),
+            "ai_rate": rate(cumulative["ai_calls"]),
+            "empty_rate": rate(cumulative["empty"]),
+            "error_rate": rate(cumulative["errors"]),
         },
         "cache": {
             **cache_stats,
@@ -487,20 +509,23 @@ def api_cache_delete(key: str, request: Request) -> JSONResponse:
 @app.get("/health")
 def health() -> dict[str, Any]:
     # 同步端点：cache.stats() 是阻塞 SQLite，交给 FastAPI 的线程池
+    cumulative, session = _counters()
     return {
         "ok": True,
         "uptime": round(time.time() - START_TS, 1),
         "model": settings.model,
         "effort": settings.reasoning_effort,
         "cache": cache.stats(),
-        "stats": STATS,
+        "stats": cumulative,
+        "session": session,
         "warnings": settings.validate(),
     }
 
 
 @app.get("/stats")
 def stats_endpoint() -> dict[str, Any]:
-    return {"stats": STATS, "cache": cache.stats()}
+    cumulative, session = _counters()
+    return {"stats": cumulative, "session": session, "cache": cache.stats()}
 
 
 if __name__ == "__main__":

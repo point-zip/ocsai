@@ -270,9 +270,9 @@ location / {
 | GET | `/` | 管理面板（看板 + 缓存浏览） |
 | POST | `/solve` | 脚本调用 |
 | GET/HEAD | `/solve` | 连接探测（返回 200） |
-| GET | `/health` | 健康检查 + 统计 |
-| GET | `/stats` | 缓存与调用统计 |
-| GET | `/api/dashboard` | 看板数据（运行时统计 + 缓存概况） |
+| GET | `/health` | 健康检查 + 统计（`stats` 累计 / `session` 本次运行） |
+| GET | `/stats` | 同上，只返回统计部分 |
+| GET | `/api/dashboard` | 看板数据：累计统计 + 本次运行 + 缓存概况 |
 | GET | `/api/cache` | 缓存分页浏览，支持 `page` `size` `q` `sort` |
 | DELETE | `/api/cache/{key}` | 删除单条缓存，需要 `OCS_ADMIN_TOKEN` |
 
@@ -305,6 +305,19 @@ location / {
 `GET /api/cache` 参数：`page`（默认 1）、`size`（默认 20，上限 200）、
 `q`（在题干和答案里做子串匹配）、`sort`（`recent` 默认 / `hits`）。
 
+`GET /api/dashboard` 返回里统计分两套：
+
+```json
+{
+  "stats":   {"requests": 148, "cache_hit": 96, "ai_calls": 52, "errors": 1, "empty": 4},
+  "session": {"requests": 0,   "cache_hit": 0,  "ai_calls": 0,  "errors": 0, "empty": 0},
+  "derived": {"hit_rate": 0.6486, "ai_rate": 0.3514, "empty_rate": 0.027, "error_rate": 0.0068}
+}
+```
+
+`stats` 是跨重启累计（存在 SQLite 的 `counters` 表），`session` 是本次进程的增量，
+`derived` 全部按 `stats` 计算。
+
 `DELETE /api/cache/{key}` 的鉴权分级：
 
 | 服务端配置 | 请求头 | 结果 |
@@ -331,6 +344,16 @@ location / {
 - 空答案数、错误数
 - 缓存开关与 TTL
 - 启动时的配置告警（比如对外监听却没设 token）
+
+**统计是持久化的**。请求数、缓存命中、AI 调用、空答案、错误都累计在 SQLite 的
+`counters` 表里，重启服务不会归零：
+
+- 卡片上的大数字是**跨重启累计**
+- 副标题里的「本次 +N」是**当前进程**的增量
+- 命中率等比率一律按累计算——重启后归零的比率没有参考意义
+- 计数走内存缓冲，每 16 次计数搭下一次缓存读写的便车落盘，进程退出时兜底刷一次；
+  被 `kill -9` 最多丢最后十几次
+- 缓存被关闭（`OCS_CACHE_ENABLED=false`）时依然会建库落盘
 
 **缓存题目浏览**：按最近更新或命中次数排序，支持搜索题干/答案、分页（20/50/100 每页）。
 每行显示题型、答案、置信度、命中次数、创建时间和过期标记（超出 TTL 的行命中路径不会再用到）。
@@ -393,6 +416,8 @@ python migrate_cache.py --src cache.sqlite3 --in-place --verify
 - **旧键不含图片信息**，迁移后所有行都按「无图」记录。旧库里若混有图片题的缓存，
   会以无图身份存在，理论上可能与同题干的纯文字题撞键。保守做法是加
   `--skip-image-suspects`，按题干关键词（如图/下图/图中…）跳过这批行。
+- 统计用的 `counters` 表由 `CREATE TABLE IF NOT EXISTS` 自动创建，老库不需要迁移，
+  首次启动后累计值从 0 开始重新统计。
 
 ---
 

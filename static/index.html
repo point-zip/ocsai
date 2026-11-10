@@ -389,6 +389,7 @@ function metric(label, value, hint, cls, hero) {
 
 function renderMetrics(d) {
   const st = d.stats || {};
+  const sess = d.session || {};
   const cv = d.cache || {};
   const dv = d.derived || {};
   const rows = cv.max_rows ? Math.min(1, (cv.rows || 0) / cv.max_rows) : 0;
@@ -398,21 +399,23 @@ function renderMetrics(d) {
   const reqs = st.requests || 0;
   const hitRate = dv.hit_rate || 0;
   const hitTone = reqs === 0 ? "" : hitRate >= 0.5 ? "ok" : hitRate > 0 ? "warn" : "danger";
+  // stats 是跨重启累计，session 是本次进程——两个都给，避免误读成「刚启动就这么多」
+  const sessTag = (k) => ` · 本次 +${num(sess[k] || 0)}`;
 
-  $("subline").textContent = `${d.model} · effort ${d.effort}`;
+  $("subline").textContent = `${d.model} · effort ${d.effort} · 统计为累计值`;
 
   $("metrics").innerHTML = [
     metric("缓存命中率", pct(hitRate),
-      `${num(st.cache_hit)} 命中 / ${num(reqs)} 请求`, hitTone, true),
+      `${num(st.cache_hit)} 命中 / ${num(reqs)} 请求${sessTag("cache_hit")}`, hitTone, true),
     metric("运行时长", dur(d.uptime), `启动于 ${esc(absTime(d.started_at))}`),
     metric("缓存条数", num(cv.rows),
       `上限 ${num(cv.max_rows)} · ${pct(rows)} 已用`, rowTone),
-    metric("AI 调用", num(st.ai_calls), `占请求 ${pct(dv.ai_rate)}`),
+    metric("AI 调用", num(st.ai_calls), `占请求 ${pct(dv.ai_rate)}${sessTag("ai_calls")}`),
     metric("总命中次数", num(cv.total_hits),
       cv.pending_hits ? `含待落盘 ${num(cv.pending_hits)}` : `TTL ${num(cv.ttl_days)} 天`),
-    metric("空答案", num(st.empty), `占请求 ${pct(dv.empty_rate)}`,
+    metric("空答案", num(st.empty), `占请求 ${pct(dv.empty_rate)}${sessTag("empty")}`,
       (st.empty || 0) > 0 ? "warn" : ""),
-    metric("错误", num(st.errors), `占请求 ${pct(dv.error_rate)}`,
+    metric("错误", num(st.errors), `占请求 ${pct(dv.error_rate)}${sessTag("errors")}`,
       (st.errors || 0) > 0 ? "danger" : ""),
     metric("缓存开关", cv.enabled ? "启用" : "关闭",
       cv.enabled ? `TTL ${num(cv.ttl_days)} 天` : "命中与写入均已停用",

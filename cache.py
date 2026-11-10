@@ -36,6 +36,12 @@ _hits_buf: dict[str, int] = {}
 _hits_total = 0
 _HITS_FLUSH_EVERY = 64
 
+# 业务计数器缓冲：name -> 未刷盘增量。
+# 和 hits 一样不能每次请求都 commit——requests 是最热的路径。
+_counters: dict[str, int] = {}
+_counters_total = 0
+_COUNTER_FLUSH_EVERY = 16
+
 # 行数检查降频
 _puts_since_count = 0
 _COUNT_EVERY = 8
@@ -60,6 +66,15 @@ def _connect() -> sqlite3.Connection:
             """
         )
         _conn.execute("CREATE INDEX IF NOT EXISTS idx_created ON answers(created_at)")
+        # 累计计数：进程重启后 requests / cache_hit / ai_calls 等不再归零
+        _conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS counters (
+                name  TEXT PRIMARY KEY,
+                value INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
         _conn.commit()
     return _conn
 
@@ -101,15 +116,71 @@ def _flush_hits(conn: sqlite3.Connection) -> None:
     _hits_total = 0
 
 
+def _flush_counters(conn: sqlite3.Connection) -> None:
+    """把攒下的业务计数一次性写盘。调用方必须持有 _lock。"""
+    global _counters_total
+    if not _counters:
+        return
+    conn.executemany(
+        "INSERT INTO counters(name, value) VALUES(?, ?) "
+        "ON CONFLICT(name) DO UPDATE SET value = value + excluded.value",
+        [(k, v) for k, v in _counters.items()],
+    )
+    conn.commit()
+    _counters.clear()
+    _counters_total = 0
+
+
+def _maybe_flush_counters(conn: sqlite3.Connection) -> None:
+    """阈值到了才刷，搭 cache.get/put 本来就要 commit 的便车。"""
+    if _counters_total >= _COUNTER_FLUSH_EVERY:
+        _flush_counters(conn)
+
+
+def bump(name: str, n: int = 1) -> None:
+    """累加一个业务计数器。纯内存，热路径零 IO。
+
+    落盘时机：下一次 cache.get/put 持锁时顺带刷（阈值触发），
+    以及进程退出时 flush() 兜底。被 kill -9 时最多丢最后十几次。
+    """
+    global _counters_total
+    _counters[name] = _counters.get(name, 0) + n
+    _counters_total += n
+
+
+def read_counters() -> dict[str, int]:
+    """累计计数：已落盘的 + 还在内存里的增量。"""
+    try:
+        with _lock:
+            conn = _connect()
+            stored = {
+                str(k): int(v)
+                for k, v in conn.execute("SELECT name, value FROM counters")
+            }
+            pending = dict(_counters)
+    except sqlite3.Error as e:
+        log.warning("计数器读取失败: %s", e)
+        return dict(_counters)
+    for k, v in pending.items():
+        stored[k] = stored.get(k, 0) + v
+    return stored
+
+
 def flush() -> None:
-    """显式刷出待写命中计数（进程退出前调用）。未建连则直接返回。"""
-    if _conn is None or not _hits_buf:
+    """显式刷出所有攒着的计数（进程退出前调用）。
+
+    缓存被关掉时 _conn 可能还没建，但 counters 仍在内存里——这里主动建连，
+    否则「缓存关闭」这个配置下统计会彻底不落盘。
+    """
+    if _conn is None and not _counters:
         return
     try:
         with _lock:
-            _flush_hits(_connect())
+            conn = _connect()
+            _flush_hits(conn)
+            _flush_counters(conn)
     except sqlite3.Error as e:
-        log.warning("命中计数刷盘失败: %s", e)
+        log.warning("计数刷盘失败: %s", e)
 
 
 def get(
@@ -126,6 +197,8 @@ def get(
     try:
         with _lock:
             conn = _connect()
+            # 未命中也要刷：requests 计数在增长，不能只在命中路径落盘
+            _maybe_flush_counters(conn)
             row = conn.execute(
                 "SELECT payload FROM answers WHERE key=? AND created_at>=?", (key, cutoff)
             ).fetchone()
@@ -172,6 +245,7 @@ def put(
                 ),
             )
             conn.commit()
+            _maybe_flush_counters(conn)
             _maybe_evict(conn)
     except sqlite3.Error as e:
         log.warning("缓存写入失败: %s", e)
